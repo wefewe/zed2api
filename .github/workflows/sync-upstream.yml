@@ -1,0 +1,58 @@
+name: Sync upstream source from csmsqj/zed-api
+
+# 上游：https://github.com/csmsqj/zed-api (MIT)。本 workflow 定时拉取其 main 分支最新
+# commit 源码同步进 upstream/，有变化则提交，并显式 dispatch build.yml 重新构建镜像。
+on:
+  schedule:
+    - cron: '27 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write   # 同步后显式 dispatch build.yml（workflow_dispatch 不受 GITHUB_TOKEN 触发限制）
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Fetch latest upstream commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth_header="Authorization: Bearer $GH_TOKEN"
+          sha=$(curl -sSL -H "$auth_header" https://api.github.com/repos/csmsqj/zed-api/commits/main \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);sys.exit(f'GitHub API error: {d}') if 'sha' not in d else print(d['sha'])")
+          echo "commit sha: $sha"
+          curl -sSL -H "$auth_header" -o /tmp/u.tgz "https://github.com/csmsqj/zed-api/archive/${sha}.tar.gz"
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          tar xzf /tmp/u.tgz -C /tmp/x
+          src=$(find /tmp/x -maxdepth 1 -type d -name 'zed-api-*' | head -1)
+          test -n "$src" || { echo "source dir not found"; exit 1; }
+          
+          # 保留自定义 Dockerfile
+          cp upstream/Dockerfile /tmp/Dockerfile.bak 2>/dev/null || true
+          rm -rf upstream && mkdir -p upstream
+          cp -a "$src"/. upstream/
+          rm -rf upstream/.github upstream/.git
+          [ -f /tmp/Dockerfile.bak ] && cp /tmp/Dockerfile.bak upstream/Dockerfile
+          echo "$sha" > upstream/UPSTREAM-REV.txt
+
+      - name: Commit if changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A -f
+            git commit -m "chore: sync upstream csmsqj/zed-api"
+            git push
+            echo "✅ upstream updated and pushed"
+            gh workflow run build.yml --repo "$GITHUB_REPOSITORY"
+          else
+            echo "✅ upstream already up to date"
+          fi
