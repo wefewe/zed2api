@@ -1,24 +1,25 @@
 # syntax=docker/dockerfile:1
-FROM node:20-alpine AS webui-build
+FROM --platform=$BUILDPLATFORM node:20-alpine AS webui-build
 WORKDIR /app/webui
 COPY webui/package*.json ./
 RUN npm ci
 COPY webui/ ./
 RUN npm run build
 
-FROM alpine:3.20 AS zig-build
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS zig-build
 ARG TARGETARCH
+ARG BUILDARCH
 WORKDIR /src
 
 RUN apk add --no-cache curl tar xz
 
-# 下载对应架构的 Zig 0.15.2
-RUN case "${TARGETARCH:-arm64}" in \
-        "amd64") ZIG_ARCH="x86_64" ;; \
-        "arm64") ZIG_ARCH="aarch64" ;; \
-        *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
+# 下载对应构建机平台的 Zig 0.15.2（原生运行，零 QEMU 仿真开销）
+RUN case "${BUILDARCH:-amd64}" in \
+        "amd64") ZIG_BUILD_ARCH="x86_64" ;; \
+        "arm64") ZIG_BUILD_ARCH="aarch64" ;; \
+        *) exit 1 ;; \
     esac && \
-    curl -fsSL "https://ziglang.org/download/0.15.2/zig-${ZIG_ARCH}-linux-0.15.2.tar.xz" -o /tmp/zig.tar.xz && \
+    curl -fsSL "https://ziglang.org/download/0.15.2/zig-${ZIG_BUILD_ARCH}-linux-0.15.2.tar.xz" -o /tmp/zig.tar.xz && \
     mkdir -p /opt/zig && \
     tar -xf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig && \
     rm -f /tmp/zig.tar.xz
@@ -26,7 +27,13 @@ RUN case "${TARGETARCH:-arm64}" in \
 COPY . .
 COPY --from=webui-build /app/webui/dist ./webui/dist
 
-RUN /opt/zig/zig build -Doptimize=ReleaseSafe
+# 利用 Zig 原生交叉编译能力，15 秒直出目标架构静态二进制
+RUN case "${TARGETARCH:-amd64}" in \
+        "amd64") ZIG_TARGET="x86_64-linux-musl" ;; \
+        "arm64") ZIG_TARGET="aarch64-linux-musl" ;; \
+        *) exit 1 ;; \
+    esac && \
+    /opt/zig/zig build -Dtarget=${ZIG_TARGET} -Doptimize=ReleaseSafe
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata curl openssl \
