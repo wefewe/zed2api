@@ -602,17 +602,7 @@ fn handleModels() !Response {
 
 /// Models advertised on /v1/models (all requests are normalized onto these).
 fn isExposedModel(id: []const u8) bool {
-    const exposed = [_][]const u8{
-        "gpt-5.6",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "gpt-5.5",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        "gemini-3-flash",
-    };
+    const exposed = [_][]const u8{ "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "claude-sonnet-5" };
     for (exposed) |m| if (std.mem.eql(u8, id, m)) return true;
     return false;
 }
@@ -701,7 +691,7 @@ fn handleLogin(body: []const u8) !Response {
         return err;
     };
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
     const tcp = try global_allocator.create(std.net.Server);
     tcp.* = addr.listen(.{}) catch |err| {
         global_allocator.free(pub_key);
