@@ -602,7 +602,17 @@ fn handleModels() !Response {
 
 /// Models advertised on /v1/models (all requests are normalized onto these).
 fn isExposedModel(id: []const u8) bool {
-    const exposed = [_][]const u8{ "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "claude-sonnet-5" };
+    const exposed = [_][]const u8{
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "gemini-3-flash",
+    };
     for (exposed) |m| if (std.mem.eql(u8, id, m)) return true;
     return false;
 }
@@ -657,12 +667,7 @@ fn convertZedModelsToOpenAI(allocator: std.mem.Allocator, raw: []const u8) ![]co
         first = false;
         try w.print("{{\"id\":\"{s}\",\"object\":\"model\",\"owned_by\":\"{s}\"}}", .{ id, provider });
     }
-    // Codex Desktop's models manager requires a top-level "models" catalog
-    // (it fails the whole turn with `missing field \`models\`` otherwise).
-    // OpenAI-style clients ignore the extra field, so both formats coexist.
-    try w.writeAll("],\"models\":");
-    try w.writeAll(std.mem.trim(u8, @embedFile("codex_models.json"), " \n\r\t"));
-    try w.writeAll("}");
+    try w.writeAll("]}");
     return try buf.toOwnedSlice();
 }
 
