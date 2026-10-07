@@ -40,6 +40,14 @@ jobs:
           [ -f /tmp/Dockerfile.bak ] && cp /tmp/Dockerfile.bak upstream/Dockerfile
           echo "$sha" > upstream/UPSTREAM-REV.txt
 
+          # 自动注入 Docker 兼容性补丁（0.0.0.0 监听 + 标准 OpenAI /v1/models）
+          python3 -c "
+s = open('upstream/src/server.zig', encoding='utf-8').read()
+s = s.replace('std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port)', 'std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port)')
+s = s.replace('try w.writeAll(\"],\\\"models\\\":\");\n    try w.writeAll(std.mem.trim(u8, @embedFile(\"codex_models.json\"), \" \\n\\r\\t\"));\n    try w.writeAll(\"}\");', 'try w.writeAll(\"]}\");')
+open('upstream/src/server.zig', 'w', encoding='utf-8').write(s)
+"
+
       - name: Commit if changed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

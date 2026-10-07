@@ -43,7 +43,7 @@ pub fn run(allocator: std.mem.Allocator, port: u16) !void {
         std.debug.print("[zed2api] proxy: none (set HTTPS_PROXY to use)\n", .{});
     }
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
     // On Windows SO_REUSEADDR allows two zed2api processes to bind the same
     // loopback port, which makes requests and logs land in different instances.
     // Fail the second start instead so one port always identifies one process.
