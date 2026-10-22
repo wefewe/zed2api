@@ -8,13 +8,15 @@ sed -i 's/127, 0, 0, 1/0, 0, 0, 0/g' upstream/src/server.zig
 python3 - << 'PY'
 path = 'upstream/src/server.zig'
 s = open(path, encoding='utf-8').read()
-anchor_old = '''    // Codex Desktop\'s models manager requires a top-level "models" catalog
-    // (it fails the whole turn with `missing field \`models\`` otherwise).
-    // OpenAI-style clients ignore the extra field, so both formats coexist.
-    try w.writeAll("],\\"models\\":");
+anchor_old = """    try w.writeAll("],\\"models\\":");
     try w.writeAll(std.mem.trim(u8, @embedFile("codex_models.json"), " \\n\\r\\t"));
-    try w.writeAll("}");'''
+    try w.writeAll("}");"""
 if anchor_old in s:
     s = s.replace(anchor_old, '    try w.writeAll("]}");')
     open(path, 'w', encoding='utf-8').write(s)
 PY
+
+# 3. 应用 organization_id 与 double-free 修复补丁
+if [ -f scripts/fix-upstream.patch ]; then
+    git apply --check scripts/fix-upstream.patch >/dev/null 2>&1 && git apply scripts/fix-upstream.patch || true
+fi

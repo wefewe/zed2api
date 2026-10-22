@@ -1,0 +1,174 @@
+diff --git a/upstream/src/accounts.zig b/upstream/src/accounts.zig
+index bd0cbbe..c112e63 100644
+--- a/upstream/src/accounts.zig
++++ b/upstream/src/accounts.zig
+@@ -48,6 +48,7 @@ pub const Account = struct {
+     credential_json: []const u8,
+     jwt_token: ?[]const u8 = null,
+     jwt_exp: i64 = 0,
++    organization_id: ?[]const u8 = null,
+ 
+     // ── Health tracking ──
+     // Unix seconds until which this account is skipped by the scheduler.
+@@ -275,10 +276,18 @@ pub const AccountManager = struct {
+             const cred_val = obj.get("credential") orelse continue;
+             const cred_json = std.json.Stringify.valueAlloc(alloc, cred_val, .{}) catch continue;
+ 
++            const org_id = blk_org: {
++                if (obj.get("organization_id")) |v| {
++                    if (v == .string and v.string.len > 0) break :blk_org try alloc.dupe(u8, v.string);
++                }
++                break :blk_org null;
++            };
++
+             self.list.append(self.allocator, .{
+                 .name = name,
+                 .user_id = uid,
+                 .credential_json = cred_json,
++                .organization_id = org_id,
+             }) catch continue;
+         }
+ 
+diff --git a/upstream/src/models.json b/upstream/src/models.json
+index be1ea57..5944098 100644
+--- a/upstream/src/models.json
++++ b/upstream/src/models.json
+@@ -1 +1 @@
+-{"object":"list","data":[{"id":"claude-sonnet-5","object":"model","owned_by":"anthropic"},{"id":"gpt-5.6","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-sol","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-terra","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-luna","object":"model","owned_by":"open_ai"},{"id":"gpt-5.5","object":"model","owned_by":"open_ai"}],"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Zed - Latest frontier agentic coding model.","default_reasoning_level":"xhigh","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":1},{"slug":"gpt-5.6","display_name":"GPT-5.6","description":"Zed - Alias of GPT-5.6-Sol.","default_reasoning_level":"xhigh","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":2},{"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","description":"Zed - GPT-5.6 Terra variant.","default_reasoning_level":"xhigh","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":3},{"slug":"gpt-5.6-luna","display_name":"GPT-5.6-Luna","description":"Zed - GPT-5.6 Luna variant.","default_reasoning_level":"xhigh","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":4},{"slug":"gpt-5.5","display_name":"GPT-5.5","description":"Zed - GPT-5.5.","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":5},{"slug":"claude-sonnet-5","display_name":"Claude Sonnet 5","description":"Zed - Claude Sonnet 5.","default_reasoning_level":"xhigh","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"}],"shell_type":"shell_command","visibility":"list","supported_in_api":true,"priority":6}]}
++{"object":"list","data":[{"id":"claude-sonnet-5","object":"model","owned_by":"anthropic"},{"id":"claude-sonnet-4-6","object":"model","owned_by":"anthropic"},{"id":"claude-sonnet-4-5","object":"model","owned_by":"anthropic"},{"id":"gpt-5.6","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-sol","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-terra","object":"model","owned_by":"open_ai"},{"id":"gpt-5.6-luna","object":"model","owned_by":"open_ai"},{"id":"gpt-5.5","object":"model","owned_by":"open_ai"},{"id":"gemini-3-flash","object":"model","owned_by":"google"}]}
+diff --git a/upstream/src/zed.zig b/upstream/src/zed.zig
+index 938a0df..9045a50 100644
+--- a/upstream/src/zed.zig
++++ b/upstream/src/zed.zig
+@@ -28,6 +28,17 @@ fn fetchNewToken(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const
+     // matching the chat/model paths. Going direct here was the root cause of
+     // intermittent "Token Refresh" failures in proxied environments.
+     proxy.init(allocator);
++
++    // Resolve organization_id if not already known
++    if (acc.organization_id == null) {
++        if (fetchOrganizationId(allocator, acc)) |org_id| {
++            acc.organization_id = org_id;
++            std.debug.print("[zed] resolved organization_id '{s}' for uid {s}\n", .{ org_id, acc.user_id });
++        } else |err| {
++            std.debug.print("[zed] could not resolve organization_id for uid {s}: {}\n", .{ acc.user_id, err });
++        }
++    }
++
+     const body = if (proxy.getHost() != null)
+         try fetchTokenViaProxy(allocator, acc)
+     else
+@@ -49,11 +60,51 @@ fn fetchNewToken(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const
+     return token;
+ }
+ 
++fn fetchOrganizationId(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const u8 {
++    const user_info_raw = fetchBillingUsage(allocator, acc) catch |err| {
++        std.debug.print("[zed] fetchBillingUsage failed: {}\n", .{err});
++        return error.BillingFetchFailed;
++    };
++    defer allocator.free(user_info_raw);
++
++    const parsed = std.json.parseFromSlice(std.json.Value, allocator, user_info_raw, .{}) catch return error.InvalidOrgResponse;
++    defer parsed.deinit();
++
++    if (parsed.value != .object) return error.InvalidOrgResponse;
++
++    if (parsed.value.object.get("default_organization_id")) |def_org| {
++        if (def_org == .string and def_org.string.len > 0) {
++            return try allocator.dupe(u8, def_org.string);
++        }
++    }
++
++    if (parsed.value.object.get("organizations")) |orgs_val| {
++        if (orgs_val == .array and orgs_val.array.items.len > 0) {
++            const first_org = orgs_val.array.items[0];
++            if (first_org == .object) {
++                if (first_org.object.get("id")) |id_val| {
++                    if (id_val == .string and id_val.string.len > 0) {
++                        return try allocator.dupe(u8, id_val.string);
++                    }
++                }
++            }
++        }
++    }
++
++    return error.NoOrganizationIdFound;
++}
++
+ /// Fetch an LLM token directly (no proxy). Returns an owned response body.
+ fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const u8 {
+     const auth_header = try std.fmt.allocPrint(allocator, "{s} {s}", .{ acc.user_id, acc.credential_json });
+     defer allocator.free(auth_header);
+ 
++    const payload = if (acc.organization_id) |org_id|
++        try std.fmt.allocPrint(allocator, "{{\"organization_id\":\"{s}\"}}", .{org_id})
++    else
++        try allocator.dupe(u8, "{}");
++    defer allocator.free(payload);
++
+     var response_buf: std.io.Writer.Allocating = .init(allocator);
+     errdefer response_buf.deinit();
+ 
+@@ -63,7 +114,7 @@ fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]con
+     const result = client.fetch(.{
+         .location = .{ .url = "https://cloud.zed.dev/client/llm_tokens" },
+         .method = .POST,
+-        .payload = "",
++        .payload = payload,
+         .response_writer = &response_buf.writer,
+         .extra_headers = &.{
+             .{ .name = "authorization", .value = auth_header },
+@@ -73,13 +124,11 @@ fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]con
+         },
+     }) catch |err| {
+         std.debug.print("[zed] token fetch error: {}\n", .{err});
+-        response_buf.deinit();
+         return error.TokenRefreshFailed;
+     };
+ 
+     if (result.status != .ok) {
+         std.debug.print("[zed] token fetch status: {d} body: {s}\n", .{ @intFromEnum(result.status), response_buf.written() });
+-        response_buf.deinit();
+         return error.TokenRefreshFailed;
+     }
+     return try response_buf.toOwnedSlice();
+@@ -93,6 +142,12 @@ fn fetchTokenViaProxy(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
+     const auth_header = try std.fmt.allocPrint(allocator, "authorization: {s} {s}", .{ acc.user_id, acc.credential_json });
+     defer allocator.free(auth_header);
+ 
++    const payload = if (acc.organization_id) |org_id|
++        try std.fmt.allocPrint(allocator, "{{\"organization_id\":\"{s}\"}}", .{org_id})
++    else
++        try allocator.dupe(u8, "{}");
++    defer allocator.free(payload);
++
+     const result = std.process.Child.run(.{
+         .allocator = allocator,
+         .argv = &.{
+@@ -103,7 +158,8 @@ fn fetchTokenViaProxy(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
+             auth_header,                               "-H",
+             "content-type: application/json",          "-H",
+             "x-zed-system-id: " ++ SYSTEM_ID,          "-H",
+-            proxy.USER_AGENT_HEADER,                   "--max-time",
++            proxy.USER_AGENT_HEADER,                   "-d",
++            payload,                                   "--max-time",
+             "15",                                      "-w",
+             "\n__HTTP_STATUS__%{http_code}",
+         },
+@@ -323,7 +379,6 @@ fn fetchModelsDirect(allocator: std.mem.Allocator, bearer: []const u8) ![]const
+     }) catch return error.UpstreamError;
+ 
+     if (result.status != .ok) {
+-        response_buf.deinit();
+         return error.UpstreamError;
+     }
+     return try response_buf.toOwnedSlice();
+@@ -412,7 +467,6 @@ fn fetchBillingDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
+     if (result.status != .ok) {
+         const err_body = response_buf.written();
+         std.debug.print("[zed] users/me failed {}: {s}\n", .{ result.status, err_body });
+-        response_buf.deinit();
+         return error.BillingFetchFailed;
+     }
+     return try response_buf.toOwnedSlice();
