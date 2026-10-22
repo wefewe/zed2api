@@ -657,6 +657,9 @@ fn convertZedModelsToOpenAI(allocator: std.mem.Allocator, raw: []const u8) ![]co
         first = false;
         try w.print("{{\"id\":\"{s}\",\"object\":\"model\",\"owned_by\":\"{s}\"}}", .{ id, provider });
     }
+    // Codex Desktop's models manager requires a top-level "models" catalog
+    // (it fails the whole turn with `missing field \`models\`` otherwise).
+    // OpenAI-style clients ignore the extra field, so both formats coexist.
     try w.writeAll("]}");
     return try buf.toOwnedSlice();
 }
