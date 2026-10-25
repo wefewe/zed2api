@@ -48,7 +48,6 @@ pub const Account = struct {
     credential_json: []const u8,
     jwt_token: ?[]const u8 = null,
     jwt_exp: i64 = 0,
-    organization_id: ?[]const u8 = null,
 
     // ── Health tracking ──
     // Unix seconds until which this account is skipped by the scheduler.
@@ -65,10 +64,6 @@ pub const Account = struct {
     last_probe_state: ProbeState = .unchecked,
     last_probe_at: i64 = 0,
     last_probe_latency_ms: i64 = 0,
-
-    // Notification & alert tracking
-    was_unhealthy: bool = false,
-    last_unhealthy_alert_at: i64 = 0,
 };
 
 pub const AccountManager = struct {
@@ -280,18 +275,10 @@ pub const AccountManager = struct {
             const cred_val = obj.get("credential") orelse continue;
             const cred_json = std.json.Stringify.valueAlloc(alloc, cred_val, .{}) catch continue;
 
-            const org_id = blk_org: {
-                if (obj.get("organization_id")) |v| {
-                    if (v == .string and v.string.len > 0) break :blk_org try alloc.dupe(u8, v.string);
-                }
-                break :blk_org null;
-            };
-
             self.list.append(self.allocator, .{
                 .name = name,
                 .user_id = uid,
                 .credential_json = cred_json,
-                .organization_id = org_id,
             }) catch continue;
         }
 

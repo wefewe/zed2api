@@ -28,185 +28,6 @@ var cached_models_openai: ?[]const u8 = null;
 var cached_models_time: i64 = 0;
 const MODELS_CACHE_TTL: i64 = 3600; // 1 hour
 
-// Periodic health probe configuration
-var auto_probe_interval_s: u64 = 1800; // default 30 minutes
-var last_auto_probe_at: i64 = 0;
-var next_auto_probe_at: i64 = 0;
-
-pub const UNHEALTHY_REMINDER_INTERVAL_S: i64 = 3600; // 1 hour throttle for persistent unhealthiness
-
-pub const NotificationAction = enum {
-    none,
-    send_unhealthy_alert,
-    send_unhealthy_reminder,
-    send_recovery,
-};
-
-fn loadAutoProbeInterval(allocator: std.mem.Allocator) u64 {
-    if (std.process.getEnvVarOwned(allocator, "HEALTH_PROBE_INTERVAL_SECONDS")) |val| {
-        defer allocator.free(val);
-        const trimmed = std.mem.trim(u8, val, " \t\r\n");
-        if (std.fmt.parseInt(u64, trimmed, 10)) |secs| {
-            return secs;
-        } else |_| {}
-    } else |_| {}
-    if (std.process.getEnvVarOwned(allocator, "HEALTH_PROBE_INTERVAL_MINUTES")) |val| {
-        defer allocator.free(val);
-        const trimmed = std.mem.trim(u8, val, " \t\r\n");
-        if (std.fmt.parseInt(u64, trimmed, 10)) |mins| {
-            return mins * 60;
-        } else |_| {}
-    } else |_| {}
-    return 1800; // default 30 minutes
-}
-
-fn autoProbeLoop() void {
-    // Initial startup grace period: wait 5s for server binding and network to settle
-    std.Thread.sleep(5 * std.time.ns_per_s);
-
-    while (true) {
-        const interval = auto_probe_interval_s;
-        if (interval == 0) {
-            std.Thread.sleep(60 * std.time.ns_per_s);
-            continue;
-        }
-
-        const now = std.time.timestamp();
-        last_auto_probe_at = now;
-        next_auto_probe_at = now + @as(i64, @intCast(interval));
-
-        std.debug.print("[auto-probe] starting scheduled health probe for {d} account(s)\n", .{account_mgr.list.items.len});
-        for (account_mgr.list.items) |*acc| {
-            runAccountHealthProbe(acc);
-        }
-        std.debug.print("[auto-probe] probe round finished, next at {d}\n", .{next_auto_probe_at});
-
-        var elapsed: u64 = 0;
-        while (elapsed < interval) {
-            std.Thread.sleep(5 * std.time.ns_per_s);
-            elapsed += 5;
-        }
-    }
-}
-
-pub fn computeAccountUsability(token_ok: bool, billing_ok: bool, quota_usable: bool, model_ok: bool) bool {
-    return token_ok and billing_ok and quota_usable and model_ok;
-}
-
-fn formatUtcTimestamp(buf: []u8, ts: i64) []const u8 {
-    const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(0, ts)) };
-    const epoch_day = epoch_seconds.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_seconds = epoch_seconds.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        day_seconds.getHoursIntoDay(),
-        day_seconds.getMinutesIntoHour(),
-        day_seconds.getSecondsIntoMinute(),
-    }) catch "unknown";
-}
-
-pub fn evaluateAccountNotificationState(
-    acc: *accounts.Account,
-    now: i64,
-    reminder_interval_s: i64,
-) NotificationAction {
-    const is_healthy = (acc.last_probe_state == .healthy);
-
-    if (is_healthy) {
-        if (acc.was_unhealthy) {
-            acc.was_unhealthy = false;
-            acc.last_unhealthy_alert_at = 0;
-            return .send_recovery;
-        }
-        return .none;
-    } else {
-        if (!acc.was_unhealthy) {
-            acc.was_unhealthy = true;
-            acc.last_unhealthy_alert_at = now;
-            return .send_unhealthy_alert;
-        } else {
-            if (now - acc.last_unhealthy_alert_at >= reminder_interval_s) {
-                acc.last_unhealthy_alert_at = now;
-                return .send_unhealthy_reminder;
-            }
-            return .none;
-        }
-    }
-}
-
-fn sendTelegramNotification(allocator: std.mem.Allocator, message: []const u8) void {
-    var custom_path: ?[]const u8 = null;
-    var script_path: []const u8 = "/usr/local/bin/cluster-tg-notify.sh";
-    if (std.process.getEnvVarOwned(allocator, "TG_NOTIFY_SCRIPT")) |val| {
-        custom_path = val;
-        script_path = val;
-    } else |_| {}
-    defer if (custom_path) |p| allocator.free(p);
-
-    std.fs.accessAbsolute(script_path, .{}) catch |err| {
-        std.debug.print("[notify] notification script '{s}' not accessible: {}\n", .{ script_path, err });
-        return;
-    };
-
-    const res = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ script_path, message },
-    }) catch |err| {
-        std.debug.print("[notify] failed to execute '{s}': {}\n", .{ script_path, err });
-        return;
-    };
-    defer {
-        allocator.free(res.stdout);
-        allocator.free(res.stderr);
-    }
-    std.debug.print("[notify] executed '{s}', term={}\n", .{ script_path, res.term });
-}
-
-fn evaluateAccountNotification(acc: *accounts.Account) void {
-    const now = std.time.timestamp();
-    const action = evaluateAccountNotificationState(acc, now, UNHEALTHY_REMINDER_INTERVAL_S);
-    if (action == .none) return;
-
-    var time_buf: [64]u8 = undefined;
-    const time_str = formatUtcTimestamp(&time_buf, now);
-    const state_str = @tagName(acc.last_probe_state);
-
-    switch (action) {
-        .send_unhealthy_alert => {
-            var msg_buf: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf,
-                "⚠️ [zed2api] 账号模型探测异常\n账号: {s}\n模型状态: {s}\nHTTP 状态: {d}\n时间: {s}",
-                .{ acc.name, state_str, acc.last_status, time_str },
-            ) catch return;
-            std.debug.print("[notify] account '{s}' became unhealthy ({s}), sending TG notification\n", .{ acc.name, state_str });
-            sendTelegramNotification(global_allocator, msg);
-        },
-        .send_unhealthy_reminder => {
-            var msg_buf: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf,
-                "⚠️ [zed2api] 账号模型持续异常 (每小时提醒)\n账号: {s}\n模型状态: {s}\nHTTP 状态: {d}\n时间: {s}",
-                .{ acc.name, state_str, acc.last_status, time_str },
-            ) catch return;
-            std.debug.print("[notify] account '{s}' persistently unhealthy, sending hourly reminder\n", .{acc.name});
-            sendTelegramNotification(global_allocator, msg);
-        },
-        .send_recovery => {
-            var msg_buf: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf,
-                "✅ [zed2api] 账号模型探测恢复健康\n账号: {s}\n模型探测正常 (耗时 {d}ms)\n时间: {s}",
-                .{ acc.name, acc.last_probe_latency_ms, time_str },
-            ) catch return;
-            std.debug.print("[notify] account '{s}' recovered, sending TG notification\n", .{acc.name});
-            sendTelegramNotification(global_allocator, msg);
-        },
-        .none => {},
-    }
-}
-
 pub fn run(allocator: std.mem.Allocator, port: u16) !void {
     global_allocator = allocator;
     account_mgr = accounts.AccountManager.init(allocator);
@@ -214,16 +35,6 @@ pub fn run(allocator: std.mem.Allocator, port: u16) !void {
     account_mgr.loadFromFile() catch {};
 
     std.debug.print("[zed2api] http://127.0.0.1:{d}\n[zed2api] {d} account(s) loaded\n", .{ port, account_mgr.list.items.len });
-
-    auto_probe_interval_s = loadAutoProbeInterval(allocator);
-    std.debug.print("[zed2api] auto-probe interval: {d}s\n", .{auto_probe_interval_s});
-    if (auto_probe_interval_s > 0) {
-        if (std.Thread.spawn(.{}, autoProbeLoop, .{})) |probe_thread| {
-            probe_thread.detach();
-        } else |err| {
-            std.debug.print("[zed2api] warning: failed to start auto-probe thread: {}\n", .{err});
-        }
-    }
 
     proxy.init(allocator);
     if (proxy.getHost()) |host| {
@@ -530,12 +341,7 @@ fn handleAccountStatuses() !Response {
     errdefer output.deinit();
     const w = &output.writer;
 
-    try w.print("{{\"checked_at\":{d},\"auto_probe\":{{\"interval_s\":{d},\"last_probe_at\":{d},\"next_probe_at\":{d}}},\"accounts\":[", .{
-        now,
-        auto_probe_interval_s,
-        last_auto_probe_at,
-        next_auto_probe_at,
-    });
+    try w.print("{{\"checked_at\":{d},\"accounts\":[", .{now});
     for (account_mgr.list.items, 0..) |*acc, index| {
         if (index > 0) try w.writeAll(",");
         const scheduler_healthy = accounts.AccountManager.isAvailable(acc);
@@ -551,10 +357,9 @@ fn handleAccountStatuses() !Response {
             cooldown,
             acc.last_status,
         });
-        const model_ok = (acc.last_probe_state == .healthy);
         try w.print(",\"model_state\":\"{s}\",\"model_ok\":{s},\"model_checked_at\":{d},\"model_latency_ms\":{d}", .{
             @tagName(acc.last_probe_state),
-            if (model_ok) "true" else "false",
+            if (acc.last_probe_state == .healthy) "true" else "false",
             acc.last_probe_at,
             acc.last_probe_latency_ms,
         });
@@ -569,16 +374,15 @@ fn handleAccountStatuses() !Response {
         if (billing_result) |billing| {
             defer global_allocator.free(billing);
             const parsed = std.json.parseFromSlice(std.json.Value, global_allocator, billing, .{}) catch {
-                try w.writeAll(",\"check_ok\":false,\"token_ok\":true,\"billing_ok\":false,\"usable\":false,\"quota_state\":\"unknown\",\"error\":\"invalid_billing_response\"}");
+                try w.writeAll(",\"check_ok\":false,\"token_ok\":true,\"billing_ok\":false,\"usable\":true,\"quota_state\":\"unknown\",\"error\":\"invalid_billing_response\"}");
                 continue;
             };
             defer parsed.deinit();
 
             const summary = account_status.summarize(parsed.value);
             const state = account_status.quotaState(summary);
-            const is_usable = computeAccountUsability(true, true, account_status.isUsable(summary), model_ok);
             try w.print(",\"check_ok\":true,\"token_ok\":true,\"billing_ok\":true,\"usable\":{s},\"quota_state\":\"{s}\",\"plan\":", .{
-                if (is_usable) "true" else "false",
+                if (account_status.isUsable(summary)) "true" else "false",
                 state,
             });
             try std.json.Stringify.encodeJsonString(summary.plan, .{}, w);
@@ -596,8 +400,9 @@ fn handleAccountStatuses() !Response {
                 if (summary.account_too_young) "true" else "false",
             });
         } else |_| {
-            // Billing endpoint unavailable: token is ok but billing is not ok, so usable is false
-            try w.writeAll(",\"check_ok\":false,\"token_ok\":true,\"billing_ok\":false,\"usable\":false,\"quota_state\":\"unknown\",\"error\":\"billing_check_failed\"}");
+            // The LLM token is valid, so model access may still work even when
+            // the optional billing endpoint is temporarily unavailable.
+            try w.writeAll(",\"check_ok\":false,\"token_ok\":true,\"billing_ok\":false,\"usable\":true,\"quota_state\":\"unknown\",\"error\":\"billing_check_failed\"}");
         }
     }
     try w.writeAll("]}");
@@ -617,11 +422,9 @@ fn runAccountHealthProbe(acc: *accounts.Account) void {
         if (!has_text) {
             accounts.AccountManager.markProbeFailure(acc, .upstream_error, .transient, 502, latency_ms);
             std.debug.print("[health] account '{s}' probe returned no visible text ({d}ms)\n", .{ acc.name, latency_ms });
-            evaluateAccountNotification(acc);
             return;
         }
         accounts.AccountManager.markProbeSuccess(acc, latency_ms);
-        evaluateAccountNotification(acc);
         return;
     } else |err| {
         const state: accounts.ProbeState = switch (err) {
@@ -631,7 +434,6 @@ fn runAccountHealthProbe(acc: *accounts.Account) void {
         };
         accounts.AccountManager.markProbeFailure(acc, state, failureKind(err), statusForError(err), latency_ms);
         std.debug.print("[health] account '{s}' probe failed: {} ({d}ms)\n", .{ acc.name, err, latency_ms });
-        evaluateAccountNotification(acc);
     }
 }
 
@@ -982,61 +784,4 @@ test "health probe payload matches its advertised safety budget" {
     try std.testing.expectEqualStrings(HEALTH_PROBE_MODEL, body.get("model").?.string);
     try std.testing.expectEqualStrings(HEALTH_PROBE_EFFORT, body.get("reasoning_effort").?.string);
     try std.testing.expectEqual(HEALTH_PROBE_MAX_OUTPUT_TOKENS, body.get("max_completion_tokens").?.integer);
-}
-
-test "account usability requires token_ok, billing_ok, and model_ok" {
-    // Both token_ok, billing_ok and model_ok must be true
-    try std.testing.expect(computeAccountUsability(true, true, true, true) == true);
-    // Quota exhausted -> false
-    try std.testing.expect(computeAccountUsability(true, true, false, true) == false);
-    // Model not ok -> false
-    try std.testing.expect(computeAccountUsability(true, true, true, false) == false);
-    // Billing failed -> false
-    try std.testing.expect(computeAccountUsability(true, false, true, true) == false);
-    // Token failed -> false
-    try std.testing.expect(computeAccountUsability(false, true, true, true) == false);
-}
-
-test "notification state machine transitions and throttling" {
-    var acc: accounts.Account = .{
-        .name = "test_acc",
-        .user_id = "12345",
-        .credential_json = "{}",
-    };
-
-    const t0: i64 = 10000;
-    // 1. Initial healthy state -> probe healthy -> no notification
-    acc.last_probe_state = .healthy;
-    try std.testing.expectEqual(NotificationAction.none, evaluateAccountNotificationState(&acc, t0, 3600));
-    try std.testing.expect(!acc.was_unhealthy);
-
-    // 2. Health probe fails (auth_error) -> transition to unhealthy -> send alert
-    acc.last_probe_state = .auth_error;
-    try std.testing.expectEqual(NotificationAction.send_unhealthy_alert, evaluateAccountNotificationState(&acc, t0, 3600));
-    try std.testing.expect(acc.was_unhealthy);
-    try std.testing.expectEqual(t0, acc.last_unhealthy_alert_at);
-
-    // 3. 30 minutes later (1800s), probe fails again -> throttled (< 3600s) -> none
-    const t1 = t0 + 1800;
-    try std.testing.expectEqual(NotificationAction.none, evaluateAccountNotificationState(&acc, t1, 3600));
-    try std.testing.expect(acc.was_unhealthy);
-    try std.testing.expectEqual(t0, acc.last_unhealthy_alert_at);
-
-    // 4. 60 minutes later (3600s), probe still fails -> hourly reminder -> send reminder
-    const t2 = t0 + 3600;
-    try std.testing.expectEqual(NotificationAction.send_unhealthy_reminder, evaluateAccountNotificationState(&acc, t2, 3600));
-    try std.testing.expect(acc.was_unhealthy);
-    try std.testing.expectEqual(t2, acc.last_unhealthy_alert_at);
-
-    // 5. Another probe 10 minutes later -> throttled again
-    try std.testing.expectEqual(NotificationAction.none, evaluateAccountNotificationState(&acc, t2 + 600, 3600));
-
-    // 6. Account recovers -> probe healthy -> send recovery
-    acc.last_probe_state = .healthy;
-    try std.testing.expectEqual(NotificationAction.send_recovery, evaluateAccountNotificationState(&acc, t2 + 1200, 3600));
-    try std.testing.expect(!acc.was_unhealthy);
-    try std.testing.expectEqual(@as(i64, 0), acc.last_unhealthy_alert_at);
-
-    // 7. Subsequent healthy probe -> no notification
-    try std.testing.expectEqual(NotificationAction.none, evaluateAccountNotificationState(&acc, t2 + 1800, 3600));
 }

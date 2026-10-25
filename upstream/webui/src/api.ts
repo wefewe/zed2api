@@ -40,15 +40,8 @@ export interface AccountQuotaStatus {
   error?: string
 }
 
-export interface AutoProbeStatus {
-  interval_s: number
-  last_probe_at: number
-  next_probe_at: number
-}
-
 export interface AccountStatusesResponse {
   checked_at: number
-  auto_probe?: AutoProbeStatus
   accounts: AccountQuotaStatus[]
 }
 

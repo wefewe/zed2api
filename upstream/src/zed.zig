@@ -28,17 +28,6 @@ fn fetchNewToken(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const 
     // matching the chat/model paths. Going direct here was the root cause of
     // intermittent "Token Refresh" failures in proxied environments.
     proxy.init(allocator);
-
-    // Resolve organization_id if not already known
-    if (acc.organization_id == null) {
-        if (fetchOrganizationId(allocator, acc)) |org_id| {
-            acc.organization_id = org_id;
-            std.debug.print("[zed] resolved organization_id '{s}' for uid {s}\n", .{ org_id, acc.user_id });
-        } else |err| {
-            std.debug.print("[zed] could not resolve organization_id for uid {s}: {}\n", .{ acc.user_id, err });
-        }
-    }
-
     const body = if (proxy.getHost() != null)
         try fetchTokenViaProxy(allocator, acc)
     else
@@ -60,50 +49,10 @@ fn fetchNewToken(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const 
     return token;
 }
 
-fn fetchOrganizationId(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const u8 {
-    const user_info_raw = fetchBillingUsage(allocator, acc) catch |err| {
-        std.debug.print("[zed] fetchBillingUsage failed: {}\n", .{err});
-        return error.BillingFetchFailed;
-    };
-    defer allocator.free(user_info_raw);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, user_info_raw, .{}) catch return error.InvalidOrgResponse;
-    defer parsed.deinit();
-
-    if (parsed.value != .object) return error.InvalidOrgResponse;
-
-    if (parsed.value.object.get("default_organization_id")) |def_org| {
-        if (def_org == .string and def_org.string.len > 0) {
-            return try allocator.dupe(u8, def_org.string);
-        }
-    }
-
-    if (parsed.value.object.get("organizations")) |orgs_val| {
-        if (orgs_val == .array and orgs_val.array.items.len > 0) {
-            const first_org = orgs_val.array.items[0];
-            if (first_org == .object) {
-                if (first_org.object.get("id")) |id_val| {
-                    if (id_val == .string and id_val.string.len > 0) {
-                        return try allocator.dupe(u8, id_val.string);
-                    }
-                }
-            }
-        }
-    }
-
-    return error.NoOrganizationIdFound;
-}
-
 /// Fetch an LLM token directly (no proxy). Returns an owned response body.
 fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]const u8 {
     const auth_header = try std.fmt.allocPrint(allocator, "{s} {s}", .{ acc.user_id, acc.credential_json });
     defer allocator.free(auth_header);
-
-    const payload = if (acc.organization_id) |org_id|
-        try std.fmt.allocPrint(allocator, "{{\"organization_id\":\"{s}\"}}", .{org_id})
-    else
-        try allocator.dupe(u8, "{}");
-    defer allocator.free(payload);
 
     var response_buf: std.io.Writer.Allocating = .init(allocator);
     errdefer response_buf.deinit();
@@ -114,7 +63,7 @@ fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]con
     const result = client.fetch(.{
         .location = .{ .url = "https://cloud.zed.dev/client/llm_tokens" },
         .method = .POST,
-        .payload = payload,
+        .payload = "",
         .response_writer = &response_buf.writer,
         .extra_headers = &.{
             .{ .name = "authorization", .value = auth_header },
@@ -124,11 +73,13 @@ fn fetchTokenDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]con
         },
     }) catch |err| {
         std.debug.print("[zed] token fetch error: {}\n", .{err});
+        response_buf.deinit();
         return error.TokenRefreshFailed;
     };
 
     if (result.status != .ok) {
         std.debug.print("[zed] token fetch status: {d} body: {s}\n", .{ @intFromEnum(result.status), response_buf.written() });
+        response_buf.deinit();
         return error.TokenRefreshFailed;
     }
     return try response_buf.toOwnedSlice();
@@ -142,12 +93,6 @@ fn fetchTokenViaProxy(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
     const auth_header = try std.fmt.allocPrint(allocator, "authorization: {s} {s}", .{ acc.user_id, acc.credential_json });
     defer allocator.free(auth_header);
 
-    const payload = if (acc.organization_id) |org_id|
-        try std.fmt.allocPrint(allocator, "{{\"organization_id\":\"{s}\"}}", .{org_id})
-    else
-        try allocator.dupe(u8, "{}");
-    defer allocator.free(payload);
-
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{
@@ -158,8 +103,7 @@ fn fetchTokenViaProxy(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
             auth_header,                               "-H",
             "content-type: application/json",          "-H",
             "x-zed-system-id: " ++ SYSTEM_ID,          "-H",
-            proxy.USER_AGENT_HEADER,                   "-d",
-            payload,                                   "--max-time",
+            proxy.USER_AGENT_HEADER,                   "--max-time",
             "15",                                      "-w",
             "\n__HTTP_STATUS__%{http_code}",
         },
@@ -379,6 +323,7 @@ fn fetchModelsDirect(allocator: std.mem.Allocator, bearer: []const u8) ![]const 
     }) catch return error.UpstreamError;
 
     if (result.status != .ok) {
+        response_buf.deinit();
         return error.UpstreamError;
     }
     return try response_buf.toOwnedSlice();
@@ -467,6 +412,7 @@ fn fetchBillingDirect(allocator: std.mem.Allocator, acc: *accounts.Account) ![]c
     if (result.status != .ok) {
         const err_body = response_buf.written();
         std.debug.print("[zed] users/me failed {}: {s}\n", .{ result.status, err_body });
+        response_buf.deinit();
         return error.BillingFetchFailed;
     }
     return try response_buf.toOwnedSlice();

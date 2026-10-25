@@ -8,7 +8,6 @@ import {
   type Account,
   type AccountHealthResult,
   type AccountQuotaStatus,
-  type AutoProbeStatus,
 } from '../api'
 import { icons } from '../icons'
 import { showToast } from '../toast'
@@ -17,7 +16,6 @@ let accounts: Account[] = []
 let statuses = new Map<string, AccountQuotaStatus>()
 let refreshingAccountData = false
 let checkingAllAccounts = false
-let lastAutoProbe: AutoProbeStatus | undefined
 const checkingAccounts = new Set<string>()
 
 function escapeHtml(value: string): string {
@@ -103,48 +101,36 @@ function healthPresentation(status: AccountQuotaStatus | undefined, accountName:
     }
   }
 
-  const modelCheckedAt = status?.model_checked_at ?? 0
-  if (modelCheckedAt === 0 || !status?.model_state || status.model_state === 'unchecked') {
-    return {
-      className: 'unchecked',
-      label: '未探测',
-      detail: '尚未进行真实模型请求探测',
-    }
-  }
-
-  const lastStatus = status.last_status ? `HTTP ${status.last_status}` : '网络/鉴权异常'
-  const probeTime = formatCheckedAt(status.model_checked_at)
-
-  switch (status.model_state) {
+  switch (status?.model_state ?? 'unchecked') {
     case 'healthy':
       return {
         className: 'available',
         label: '模型正常',
-        detail: `推理耗时 ${status?.model_latency_ms ?? 0} 毫秒 · ${probeTime}`,
+        detail: `推理耗时 ${status?.model_latency_ms ?? 0} 毫秒 · ${formatCheckedAt(status?.model_checked_at)}`,
       }
     case 'auth_error':
       return {
         className: 'unavailable',
-        label: '不健康 (认证失败)',
-        detail: `失败原因：${lastStatus} · ${probeTime}`,
+        label: '认证失败',
+        detail: '真实模型请求未通过账号认证',
       }
     case 'rate_limited':
       return {
         className: 'warning',
-        label: '不健康 (触发限流)',
-        detail: `失败原因：${lastStatus} · ${probeTime}`,
+        label: '触发限流',
+        detail: '模型路由返回频率或额度限制，账号已进入冷却',
       }
     case 'upstream_error':
       return {
         className: 'unavailable',
-        label: '不健康 (上游异常)',
-        detail: `失败原因：${lastStatus} · ${probeTime}`,
+        label: '上游异常',
+        detail: '低成本推理探测没有完整结束',
       }
     default:
       return {
         className: 'unchecked',
-        label: '未探测',
-        detail: '尚未进行真实模型请求探测',
+        label: '尚未实测',
+        detail: '点击实测 Luna 后只发送一次最小推理请求',
       }
   }
 }
@@ -194,10 +180,6 @@ function renderOverview(checkedAt?: number) {
     ? new Date(checkedAt * 1000).toLocaleTimeString('zh-CN', { hour12: false })
     : '等待刷新'
 
-  const autoProbeInfo = lastAutoProbe && lastAutoProbe.interval_s > 0
-    ? `自动探测：每 ${Math.round(lastAutoProbe.interval_s / 60)} 分钟 · 下次 ${new Date(lastAutoProbe.next_probe_at * 1000).toLocaleTimeString('zh-CN', { hour12: false })}`
-    : `最近刷新：${escapeHtml(checked)}`
-
   overview.innerHTML = `
     <article class="metric-card featured">
       <span class="metric-label">当前调度账号</span>
@@ -205,19 +187,19 @@ function renderOverview(checkedAt?: number) {
       <small>新请求会优先使用此账号</small>
     </article>
     <article class="metric-card">
-      <span class="metric-label">综合健康可用</span>
-      <strong class="${usable > 0 ? 'metric-good' : (statuses.size ? 'metric-warn' : '')}">${statuses.size ? `${usable} / ${accounts.length}` : '--'}</strong>
-      <small>Token/账单/模型全绿</small>
+      <span class="metric-label">令牌可用</span>
+      <strong class="metric-good">${statuses.size ? `${usable} / ${accounts.length}` : '--'}</strong>
+      <small>被动令牌检查结果</small>
     </article>
     <article class="metric-card">
-      <span class="metric-label">模型实测正常</span>
-      <strong class="${healthy > 0 ? 'metric-good' : (statuses.size ? 'metric-warn' : '')}">${statuses.size ? `${healthy} / ${accounts.length}` : '--'}</strong>
+      <span class="metric-label">Luna 实测正常</span>
+      <strong class="metric-good">${statuses.size ? `${healthy} / ${accounts.length}` : '--'}</strong>
       <small>真实最小推理请求结果</small>
     </article>
     <article class="metric-card">
       <span class="metric-label">冷却中</span>
       <strong class="${cooling ? 'metric-warn' : ''}">${cooling}</strong>
-      <small>${escapeHtml(autoProbeInfo)}</small>
+      <small>最近刷新：${escapeHtml(checked)}</small>
     </article>
   `
 }
@@ -354,7 +336,6 @@ async function refreshAccountData(silent = false) {
 
   try {
     const response = await fetchAccountStatuses()
-    lastAutoProbe = response.auto_probe
     statuses = new Map(response.accounts.map(status => [status.name, status]))
     renderOverview(response.checked_at)
     renderAccountCards()
