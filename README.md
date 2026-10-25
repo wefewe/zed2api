@@ -28,3 +28,13 @@ docker run -d \
 - **Codex 兼容端点**：`http://localhost:8001/v1/responses`
 - **模型列表**：`http://localhost:8001/v1/models`
 - **账号列表**：`http://localhost:8001/zed/accounts`
+
+### 配置环境变量
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HEALTH_PROBE_INTERVAL_SECONDS` | `1800` | 定时健康探测间隔秒数（默认 30 分钟，设置为 `0` 禁用自动探测） |
+| `HEALTH_PROBE_INTERVAL_MINUTES` | - | 定时健康探测间隔分钟数（效果等同于秒数换算） |
+| `TG_NOTIFY_SCRIPT` | `/usr/local/bin/cluster-tg-notify.sh` | 探测异常或恢复时调用的 Telegram 广播通知脚本路径 |
+| `HTTPS_PROXY` | - | 上游网络代理（可选） |
+

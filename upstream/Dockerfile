@@ -36,7 +36,7 @@ RUN case "${TARGETARCH:-amd64}" in \
     /opt/zig/zig build -Dtarget=${ZIG_TARGET} -Doptimize=ReleaseSafe
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata curl openssl \
+RUN apk add --no-cache ca-certificates tzdata curl openssl bash \
  && mkdir -p /app/data
 WORKDIR /app/data
 COPY --from=zig-build /src/zig-out/bin/zed2api /usr/local/bin/zed2api

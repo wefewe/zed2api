@@ -65,6 +65,10 @@ pub const Account = struct {
     last_probe_state: ProbeState = .unchecked,
     last_probe_at: i64 = 0,
     last_probe_latency_ms: i64 = 0,
+
+    // Notification & alert tracking
+    was_unhealthy: bool = false,
+    last_unhealthy_alert_at: i64 = 0,
 };
 
 pub const AccountManager = struct {

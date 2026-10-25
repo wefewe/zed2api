@@ -43,19 +43,19 @@ const CHECKS: CheckDefinition[] = [
     },
   },
   {
-    name: '令牌与额度',
-    description: '被动检查全部账号，不产生模型请求',
+    name: '账号综合健康',
+    description: '被动检查全部账号状态，确认令牌与模型链路可用',
     run: async () => {
       const started = performance.now()
       const response = await fetch('/zed/accounts/status', { cache: 'no-store' })
       const latency = Math.round(performance.now() - started)
       if (!response.ok) return { status: 'fail', detail: `HTTP ${response.status}`, latency }
-      const data = await response.json() as { accounts?: { token_ok: boolean }[] }
+      const data = await response.json() as { accounts?: { usable: boolean; token_ok: boolean }[] }
       const accountList = data.accounts ?? []
-      const usable = accountList.filter(account => account.token_ok).length
+      const usable = accountList.filter(account => account.usable).length
       return {
         status: usable === accountList.length && accountList.length > 0 ? 'ok' : 'fail',
-        detail: `${usable}/${accountList.length} 个令牌可用`,
+        detail: `${usable}/${accountList.length} 个账号可用`,
         latency,
       }
     },
